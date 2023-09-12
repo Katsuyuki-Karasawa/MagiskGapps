@@ -4,78 +4,83 @@ import shutil
 import zipfile
 import fnmatch
 import pysftp
-import subprocess
 
-with open('module-info.json') as f:
-    contents = json.load(f)
-id = contents['result']['id']
-name = contents['result']['name']
-version = contents['result']['version']
-versionCode = contents['result']['versionCode']
-author = contents['result']['author']
-description = contents['result']['description']
-SF_folder = contents['result']['SF_folder']
-SF_version = contents['result']['SF_version']
-SF_user = contents['result']['SF_user']
-SF_pass = contents['result']['SF_pass']
+def load_json(filename):
+    with open(filename) as f:
+        return json.load(f)['result']
 
-# Create module.prop
-with open('template/module.prop', 'w') as f:
-    f.write('id=' + id +"\n" + 'name=' + name +"\n" + 'version=' + version +"\n" + 'versionCode=' + versionCode +"\n" + 'author=' + author +"\n" + 'description=' + description)
+def create_module_prop(template_file, module_info):
+    with open(template_file, 'w') as f:
+        for key, value in module_info.items():
+            f.write(f'{key}={value}\n')
 
-# Unzip and move AppSet files
-with zipfile.ZipFile("gapps.zip", 'r') as zip_ref:
-    zip_ref.extractall("gapps")
-os.mkdir("AppSet")
+def unzip_and_move_files(zip_filename, extract_folder, appset_folder):
+    with zipfile.ZipFile(zip_filename, 'r') as zip_ref:
+        zip_ref.extractall(extract_folder)
+    
+    os.mkdir(appset_folder)
+    rootPath = os.path.join(extract_folder, "AppSet")
+    pattern = '*.zip'
 
-rootPath = r"gapps/AppSet"
-pattern = '*.zip'
-for root, dirs, files in os.walk(rootPath):
-    for filename in fnmatch.filter(files, pattern):
-        print("Moving " + os.path.join(root, filename))
-        zipfile.ZipFile(os.path.join(root, filename)).extractall(os.path.join("appset/"))
-        os.remove("appset/installer.sh")
-os.remove("appset/uninstaller.sh")
-print("Moving files")
+    for root, dirs, files in os.walk(rootPath):
+        for filename in fnmatch.filter(files, pattern):
+            print(f"Moving {os.path.join(root, filename)}")
+            zipfile.ZipFile(os.path.join(root, filename)).extractall("appset/")
+            os.remove("appset/installer.sh")
+    
+    os.remove("appset/uninstaller.sh")
 
-# Renames Files from ___ to /
-path = "appset"
-os.chmod(path, 0o777)
-filenames = os.listdir(path)
-for filename in filenames:
-    src_file = os.path.join(path, filename)
-    dst_file = 'appset\\' + filename.replace('___', '\\')
-    print(f"Renaming {src_file} to {dst_file}")
-    shutil.move(src_file, dst_file)
+def rename_files(path):
+    os.chmod(path, 0o777)
+    for filename in os.listdir(path):
+        src_file = os.path.join(path, filename)
+        dst_file = os.path.join('appset', filename.replace('___', '/'))
+        print(f"Renaming {src_file} to {dst_file}")
+        shutil.move(src_file, dst_file)
 
-# Combines everything
-source_folder = r"template"
-destination_folder = r"builds"
-shutil.copytree(source_folder, destination_folder)
+def copy_and_combine_folders(src_folders, dst_folders):
+    for src, dst in zip(src_folders, dst_folders):
+        shutil.copytree(src, dst)
 
-source_folder = r"appset"
-destination_folder = r"builds/system"
-shutil.copytree(source_folder, destination_folder)
-print("Building Module")
+def clean_up(files, folders):
+    for file in files:
+        os.remove(file)
+    
+    for folder in folders:
+        shutil.rmtree(folder, ignore_errors=True)
 
-shutil.make_archive("releases/MagiskGApps-"+ version, 'zip', "builds")
-print("Building Zip and archiving")
-os.chmod("gapps", 0o777)
-os.chmod("builds", 0o777)
-os.chmod("AppSet", 0o777)
+def upload_to_sourceforge(sftp_details, local_path, remote_path):
+    with pysftp.Connection(host="frs.sourceforge.net", username=sftp_details['SF_user'], password=sftp_details['SF_pass']) as srv:
+        print("Uploading to SourceForge")
+        with srv.cd(remote_path): 
+            srv.put(local_path) 
 
-shutil.rmtree("gapps", ignore_errors=True)
-shutil.rmtree("builds", ignore_errors=True)
-os.remove("template/module.prop")
-os.remove("gapps.zip")
-shutil.rmtree("AppSet", ignore_errors=True)
+def main():
+    contents = load_json('module-info.json')
+    create_module_prop('template/module.prop', contents)
+    
+    unzip_and_move_files("gapps.zip", "gapps", "AppSet")
+    rename_files("appset")
 
-# Upload
-srv = pysftp.Connection(host="frs.sourceforge.net", username=SF_user, password=SF_pass)
-print("Uploading to SourceForge")
+    src_folders = ["template", "appset"]
+    dst_folders = ["builds", "builds/system"]
+    copy_and_combine_folders(src_folders, dst_folders)
 
-with srv.cd('/home/frs/project/magiskgapps/'+SF_folder+'/'+SF_version): #chdir to public
-    srv.put('releases/MagiskGApps-'+ version +'.zip') #upload file to nodejs/
+    version = contents['version']
+    shutil.make_archive(f"releases/MagiskGApps-{version}", 'zip', "builds")
+    print("Building Zip and archiving")
 
-# Closes the connection
-srv.close()
+    chmod_folders = ["gapps", "builds", "AppSet"]
+    for folder in chmod_folders:
+        os.chmod(folder, 0o777)
+
+    to_remove_files = ["template/module.prop", "gapps.zip"]
+    to_remove_folders = ["gapps", "builds", "AppSet"]
+    clean_up(to_remove_files, to_remove_folders)
+
+    remote_path = f'/home/frs/project/magiskgapps/{contents["SF_folder"]}/{contents["SF_version"]}'
+    local_path = f'releases/MagiskGApps-{version}.zip'
+    upload_to_sourceforge(contents, local_path, remote_path)
+
+if __name__ == "__main__":
+    main()
